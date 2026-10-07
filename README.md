@@ -10,15 +10,15 @@ Local Streamlit app to download Amazon Seller Central (India) **Seller Fee Invoi
 - Auto **Load More** until older rows are loaded or the target month is reachable
 - ZIP download in the browser (temporary; not archived on disk)
 
-## Streamlit Cloud
+## Login (same as ATS Track)
 
-This app can run on [Streamlit Community Cloud](https://streamlit.io/cloud), with limits:
+1. Sidebar → **Login to Seller Central**
+2. A Chromium window opens on your Mac; sign in to Amazon (including MFA if prompted)
+3. Session is saved to `data/sessions/auth_state.json`
 
-1. **`packages.txt`** — installs Debian **`chromium`** plus libraries (no Playwright browser download on the server).
-2. **After deploy** — use **Reboot app** in Cloud so `packages.txt` is applied.
-3. **Login** — interactive browser login **does not work** on Cloud. On your Mac, run the app locally (or atstrack), click **Login to Seller Central**, then upload `data/sessions/auth_state.json` in the Cloud app sidebar.
+If you already use **atstrack** on this machine, this app reuses `atstrack/data/sessions/auth_state.json` automatically when no local session exists yet.
 
-Redeploy after pushing changes that touch `packages.txt` or Playwright setup.
+Run the app locally (`streamlit run app.py`). Streamlit Cloud cannot open a login browser on your computer, so use local runs for auth (like ATS Track).
 
 ## Prerequisites
 

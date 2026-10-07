@@ -71,18 +71,12 @@ class SessionManager:
     def has_saved_session(self) -> bool:
         return self.resolve_session_path() is not None
 
-    def import_storage_state_json(self, raw: str | bytes) -> None:
-        self.session_path.parent.mkdir(parents=True, exist_ok=True)
-        data = raw.encode("utf-8") if isinstance(raw, str) else raw
-        with self._session_lock:
-            self.session_path.write_bytes(data)
-
     def login(self) -> None:
         if is_streamlit_cloud():
             raise RuntimeError(
-                "Interactive login is not available on Streamlit Cloud. "
-                "Log in locally (or via atstrack), then upload `data/sessions/auth_state.json` "
-                "using the sidebar uploader."
+                "Interactive login opens a browser on your computer, like ATS Track. "
+                "That is not possible on Streamlit Cloud — run locally: "
+                "`streamlit run app.py`"
             )
         ensure_playwright_browser()
         with sync_playwright() as p:

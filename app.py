@@ -50,59 +50,37 @@ def check_session() -> bool:
     return bool(st.session_state.session_valid)
 
 
+def has_session_file() -> bool:
+    return session_manager.has_saved_session()
+
+
 def session_status_text() -> str:
-    if not session_manager.has_saved_session():
+    if not has_session_file():
         return "No saved session"
     source = session_manager.session_source_label()
     if check_session():
         return f"Logged in ({source} session)"
-    return f"Session expired or invalid ({source} file present)"
-
-
-@st.cache_resource
-def bootstrap_playwright() -> None:
-    ensure_playwright_chromium()
+    if source == "atstrack":
+        return "ATS Track session on disk (re-validate or log in here to refresh)"
+    return f"Session may be expired ({source} file present)"
 
 
 def render_sidebar() -> None:
     st.sidebar.header("Seller Central")
     st.sidebar.caption(session_status_text())
 
-    if is_streamlit_cloud():
-        st.sidebar.info(
-            "On Streamlit Cloud, log in on your Mac, then upload "
-            "`data/sessions/auth_state.json` below (from this app or atstrack)."
-        )
-        uploaded = st.sidebar.file_uploader(
-            "Upload auth_state.json",
-            type=["json"],
-            help="Created after local Login to Seller Central",
-        )
-        if uploaded is not None and st.sidebar.button(
-            "Save uploaded session", use_container_width=True
-        ):
-            session_manager.import_storage_state_json(uploaded.getvalue())
-            st.session_state.session_valid = None
-            st.sidebar.success("Session file saved.")
-            st.rerun()
-    else:
+    if not is_streamlit_cloud():
         try:
-            bootstrap_playwright()
+            ensure_playwright_chromium()
         except RuntimeError as exc:
             st.sidebar.warning(str(exc))
 
-    login_disabled = is_streamlit_cloud()
-    if st.sidebar.button(
-        "Login to Seller Central",
-        use_container_width=True,
-        disabled=login_disabled,
-        help="Not available on Streamlit Cloud — upload session file instead.",
-    ):
+    if st.sidebar.button("Login to Seller Central", use_container_width=True):
         with st.spinner("Opening browser for login…"):
             try:
                 session_manager.login()
                 st.session_state.session_valid = True
-                st.sidebar.success("Login successful.")
+                st.sidebar.success("Login successful!")
                 st.rerun()
             except BrowserNotInstalledError:
                 st.sidebar.error("Playwright browser not installed.")
@@ -110,21 +88,25 @@ def render_sidebar() -> None:
             except Exception as exc:
                 st.sidebar.error(f"Login failed: {exc}")
 
-    if session_manager.has_saved_session() and st.sidebar.button(
-        "Re-validate session", use_container_width=True
-    ):
+    if has_session_file() and st.sidebar.button("Re-validate session", use_container_width=True):
         st.session_state.session_valid = session_manager.validate_session()
         st.rerun()
+
+    if is_streamlit_cloud():
+        st.sidebar.warning(
+            "Same as ATS Track: use **Login** on your Mac (`streamlit run app.py`). "
+            "Cloud cannot open a login window on your computer."
+        )
 
 
 def main() -> None:
     init_session_state()
     if is_streamlit_cloud():
-        with st.spinner("Checking system Chromium…"):
-            try:
-                bootstrap_playwright()
-            except RuntimeError as exc:
-                st.error(str(exc))
+        try:
+            ensure_playwright_chromium()
+        except RuntimeError as exc:
+            st.error(str(exc))
+
     render_sidebar()
 
     st.title("Seller Fee Invoice Downloader")
@@ -148,9 +130,11 @@ def main() -> None:
             step=1,
         )
 
-    session_ok = check_session()
+    session_ok = has_session_file()
     if not session_ok:
-        st.info("Log in via the sidebar to download invoices.")
+        st.info("Log in via the sidebar (same flow as ATS Track).")
+    elif not check_session():
+        st.warning("Session may be stale. Try **Re-validate session** or log in again.")
 
     if st.button("Download invoices", type="primary", disabled=not session_ok):
         st.session_state.last_zip = None
@@ -159,7 +143,6 @@ def main() -> None:
         st.session_state.last_warnings = []
 
         status = st.status("Starting download…", expanded=True)
-
         progress_slot = st.empty()
 
         def on_progress(message: str) -> None:
