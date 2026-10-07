@@ -19,11 +19,16 @@ DEFAULT_ATSTRACK_SESSION_PATH = (
 )
 
 LOGIN_TIMEOUT_MS = 300_000
+SIGNIN_STEP_TIMEOUT_MS = 60_000
 
 BROWSER_SETUP_MESSAGE = browser_setup_message()
 
 
 class BrowserNotInstalledError(RuntimeError):
+    pass
+
+
+class LoginError(RuntimeError):
     pass
 
 
@@ -72,11 +77,10 @@ class SessionManager:
         return self.resolve_session_path() is not None
 
     def login(self) -> None:
+        """Open a headed browser on your machine (ATS Track style). Local only."""
         if is_streamlit_cloud():
-            raise RuntimeError(
-                "Interactive login opens a browser on your computer, like ATS Track. "
-                "That is not possible on Streamlit Cloud — run locally: "
-                "`streamlit run app.py`"
+            raise LoginError(
+                "Use the email/password sign-in form below on Streamlit Cloud."
             )
         ensure_playwright_browser()
         with sync_playwright() as p:
@@ -87,6 +91,83 @@ class SessionManager:
             self._wait_for_login(page)
             self.save_storage_state(context)
             browser.close()
+
+    def login_with_credentials(
+        self,
+        email: str,
+        password: str,
+        otp: str | None = None,
+    ) -> None:
+        """Headless sign-in for Streamlit Cloud (no local browser window)."""
+        email = email.strip()
+        if not email or not password:
+            raise LoginError("Email and password are required.")
+
+        ensure_playwright_browser()
+        with sync_playwright() as p:
+            browser = launch_chromium(p, headless=True)
+            context = browser.new_context()
+            page = context.new_page()
+            page.goto(SELLER_CENTRAL_URL, wait_until="domcontentloaded", timeout=SIGNIN_STEP_TIMEOUT_MS)
+            page.wait_for_timeout(1500)
+
+            if self._is_logged_in(page):
+                self.save_storage_state(context)
+                browser.close()
+                return
+
+            self._amazon_sign_in(page, email, password, otp)
+            self._wait_for_login(page)
+            self.save_storage_state(context)
+            browser.close()
+
+    def _amazon_sign_in(
+        self,
+        page: Page,
+        email: str,
+        password: str,
+        otp: str | None,
+    ) -> None:
+        email_input = page.locator("#ap_email, input[name='email']").first
+        email_input.wait_for(state="visible", timeout=SIGNIN_STEP_TIMEOUT_MS)
+        email_input.fill(email)
+        page.locator("#continue, input#continue, button:has-text('Continue')").first.click()
+
+        password_input = page.locator("#ap_password, input[name='password']").first
+        password_input.wait_for(state="visible", timeout=SIGNIN_STEP_TIMEOUT_MS)
+        password_input.fill(password)
+        page.locator("#signInSubmit, input#signInSubmit, button:has-text('Sign in')").first.click()
+        page.wait_for_timeout(2500)
+
+        if self._needs_otp(page):
+            if not otp or not otp.strip():
+                raise LoginError(
+                    "Amazon asked for a one-time password (OTP). Enter it in the OTP field and sign in again."
+                )
+            otp_input = page.locator(
+                "#auth-mfa-otpcode, input[name='otpCode'], input[name='code']"
+            ).first
+            otp_input.wait_for(state="visible", timeout=SIGNIN_STEP_TIMEOUT_MS)
+            otp_input.fill(otp.strip())
+            page.locator(
+                "#auth-signin-button, input#auth-signin-button, button:has-text('Sign in')"
+            ).first.click()
+            page.wait_for_timeout(2500)
+
+        if page.locator("text=/captcha|puzzle|Type the characters/i").count() > 0:
+            raise LoginError(
+                "Amazon showed a CAPTCHA. Sign in locally with the browser login button instead."
+            )
+
+        if "/ap/signin" in page.url or "/ap/mfa" in page.url:
+            raise LoginError(
+                "Sign-in did not complete. Check email/password/OTP, or use local browser login."
+            )
+
+    def _needs_otp(self, page: Page) -> bool:
+        if "/ap/mfa" in page.url:
+            return True
+        return page.locator("#auth-mfa-otpcode, input[name='otpCode']").count() > 0
 
     def _wait_for_login(self, page: Page) -> None:
         page.wait_for_function(

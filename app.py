@@ -3,7 +3,12 @@ from datetime import date
 import streamlit as st
 
 from src.auth.playwright_bootstrap import ensure_playwright_chromium, is_streamlit_cloud
-from src.auth.session import BROWSER_SETUP_MESSAGE, BrowserNotInstalledError, SessionManager
+from src.auth.session import (
+    BROWSER_SETUP_MESSAGE,
+    BrowserNotInstalledError,
+    LoginError,
+    SessionManager,
+)
 from src.scraper.fee_invoices import FeeInvoiceScraper, SessionExpiredError
 from src.services.zip_bundle import ZipEntry, build_zip_bytes
 
@@ -75,7 +80,30 @@ def render_sidebar() -> None:
         except RuntimeError as exc:
             st.sidebar.warning(str(exc))
 
-    if st.sidebar.button("Login to Seller Central", use_container_width=True):
+    if is_streamlit_cloud():
+        st.sidebar.caption(
+            "On Cloud, sign in with your seller email and password (same account as Seller Central)."
+        )
+        with st.sidebar.form("cloud_login"):
+            email = st.text_input("Email", autocomplete="username")
+            password = st.text_input("Password", type="password", autocomplete="current-password")
+            otp = st.text_input("OTP (only if Amazon asks)", type="password")
+            submitted = st.form_submit_button("Sign in to Seller Central", use_container_width=True)
+        if submitted:
+            with st.spinner("Signing in…"):
+                try:
+                    session_manager.login_with_credentials(email, password, otp or None)
+                    st.session_state.session_valid = True
+                    st.sidebar.success("Login successful!")
+                    st.rerun()
+                except BrowserNotInstalledError:
+                    st.sidebar.error("Playwright browser not installed.")
+                    st.sidebar.code(BROWSER_SETUP_MESSAGE, language="bash")
+                except LoginError as exc:
+                    st.sidebar.error(str(exc))
+                except Exception as exc:
+                    st.sidebar.error(f"Login failed: {exc}")
+    elif st.sidebar.button("Login to Seller Central", use_container_width=True):
         with st.spinner("Opening browser for login…"):
             try:
                 session_manager.login()
@@ -85,18 +113,14 @@ def render_sidebar() -> None:
             except BrowserNotInstalledError:
                 st.sidebar.error("Playwright browser not installed.")
                 st.sidebar.code(BROWSER_SETUP_MESSAGE, language="bash")
+            except LoginError as exc:
+                st.sidebar.error(str(exc))
             except Exception as exc:
                 st.sidebar.error(f"Login failed: {exc}")
 
     if has_session_file() and st.sidebar.button("Re-validate session", use_container_width=True):
         st.session_state.session_valid = session_manager.validate_session()
         st.rerun()
-
-    if is_streamlit_cloud():
-        st.sidebar.warning(
-            "Same as ATS Track: use **Login** on your Mac (`streamlit run app.py`). "
-            "Cloud cannot open a login window on your computer."
-        )
 
 
 def main() -> None:

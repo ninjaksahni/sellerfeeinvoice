@@ -18,7 +18,9 @@ Local Streamlit app to download Amazon Seller Central (India) **Seller Fee Invoi
 
 If you already use **atstrack** on this machine, this app reuses `atstrack/data/sessions/auth_state.json` automatically when no local session exists yet.
 
-Run the app locally (`streamlit run app.py`). Streamlit Cloud cannot open a login browser on your computer, so use local runs for auth (like ATS Track).
+**Streamlit Cloud:** use the sidebar **email / password / OTP** form (headless sign-in on the server).
+
+**Local:** use **Login to Seller Central** to open a browser window (same as ATS Track).
 
 ## Prerequisites
 
