@@ -62,14 +62,17 @@ def has_session_file() -> bool:
 
 
 def session_status_text() -> str:
-    if not has_session_file():
-        return "No saved session"
-    source = session_manager.session_source_label()
-    if check_session():
-        return f"Logged in ({source} session)"
-    if source == "atstrack":
-        return "ATS Track session on disk (re-validate or log in here to refresh)"
-    return f"Session may be expired ({source} file present)"
+    try:
+        if not has_session_file():
+            return "No saved session"
+        source = session_manager.session_source_label()
+        if check_session():
+            return f"Logged in ({source} session)"
+        if source == "atstrack":
+            return "ATS Track session on disk (re-validate or log in here to refresh)"
+        return f"Session may be expired ({source} file present)"
+    except Exception as exc:
+        return f"Session status unavailable ({exc})"
 
 
 def render_sidebar() -> None:

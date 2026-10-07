@@ -1,7 +1,7 @@
 import json
-import os
 import re
 import threading
+from os import getenv
 from pathlib import Path
 from typing import Literal
 
@@ -51,10 +51,10 @@ class LoginError(RuntimeError):
     pass
 
 
-def atstrack_session_path() -> Path:
-    raw = os.environ.get("ATSTRACK_SESSION_PATH")
-    if raw:
-        return Path(raw).expanduser()
+def _local_atstrack_session_path() -> Path:
+    env_path = getenv("ATSTRACK_SESSION_PATH")
+    if env_path:
+        return Path(env_path).expanduser()
     return DEFAULT_ATSTRACK_SESSION_PATH
 
 
@@ -75,18 +75,23 @@ class SessionManager:
     def resolve_session_path(self) -> Path | None:
         if self.session_path.is_file():
             return self.session_path
-        if not is_streamlit_cloud():
-            fallback = atstrack_session_path()
-            if fallback.is_file():
-                return fallback
+        if is_streamlit_cloud():
+            return None
+        fallback = _local_atstrack_session_path()
+        if fallback.is_file():
+            return fallback
         return None
 
     def session_source_label(self) -> str | None:
         path = self.resolve_session_path()
         if path is None:
             return None
-        if path == self.session_path.resolve():
-            return "local"
+        try:
+            if path.resolve().samefile(self.session_path.resolve()):
+                return "local"
+        except OSError:
+            if path == self.session_path:
+                return "local"
         return "atstrack"
 
     def save_storage_state(self, context: BrowserContext) -> None:
