@@ -2,6 +2,7 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
+from src.auth.playwright_bootstrap import ensure_playwright_chromium, playwright_env
 from src.scraper.fee_invoices import EXTRACT_ROWS_JS
 
 DEBUG_HTML = (
@@ -14,8 +15,9 @@ def test_extract_rows_from_saved_page() -> None:
         return
 
     html = DEBUG_HTML.read_text(encoding="utf-8")
+    ensure_playwright_chromium()
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=True, env=playwright_env())
         page = browser.new_page()
         page.set_content(html, wait_until="domcontentloaded")
         rows = page.evaluate(EXTRACT_ROWS_JS)

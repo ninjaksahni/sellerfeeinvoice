@@ -2,7 +2,14 @@ import os
 import threading
 from pathlib import Path
 
-from playwright.sync_api import Browser, BrowserContext, Error as PlaywrightError, Page, sync_playwright
+from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
+
+from src.auth.playwright_bootstrap import (
+    browser_setup_message,
+    ensure_playwright_chromium,
+    is_streamlit_cloud,
+    playwright_env,
+)
 
 SELLER_CENTRAL_URL = "https://sellercentral.amazon.in"
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
@@ -13,13 +20,7 @@ DEFAULT_ATSTRACK_SESSION_PATH = (
 
 LOGIN_TIMEOUT_MS = 300_000
 
-BROWSER_SETUP_MESSAGE = (
-    "Playwright browser is not installed. Run this in your terminal:\n\n"
-    "  source .venv/bin/activate\n"
-    "  unset PLAYWRIGHT_BROWSERS_PATH\n"
-    "  playwright install chromium\n\n"
-    "Or run: bash scripts/setup.sh"
-)
+BROWSER_SETUP_MESSAGE = browser_setup_message()
 
 
 class BrowserNotInstalledError(RuntimeError):
@@ -33,22 +34,11 @@ def atstrack_session_path() -> Path:
     return DEFAULT_ATSTRACK_SESSION_PATH
 
 
-def playwright_env() -> dict[str, str]:
-    env = os.environ.copy()
-    env.pop("PLAYWRIGHT_BROWSERS_PATH", None)
-    return env
-
-
 def ensure_playwright_browser() -> None:
-    env = playwright_env()
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, env=env)
-            browser.close()
-    except PlaywrightError as exc:
-        if "Executable doesn't exist" in str(exc):
-            raise BrowserNotInstalledError(BROWSER_SETUP_MESSAGE) from exc
-        raise
+        ensure_playwright_chromium()
+    except RuntimeError as exc:
+        raise BrowserNotInstalledError(str(exc)) from exc
 
 
 class SessionManager:
@@ -81,7 +71,19 @@ class SessionManager:
     def has_saved_session(self) -> bool:
         return self.resolve_session_path() is not None
 
+    def import_storage_state_json(self, raw: str | bytes) -> None:
+        self.session_path.parent.mkdir(parents=True, exist_ok=True)
+        data = raw.encode("utf-8") if isinstance(raw, str) else raw
+        with self._session_lock:
+            self.session_path.write_bytes(data)
+
     def login(self) -> None:
+        if is_streamlit_cloud():
+            raise RuntimeError(
+                "Interactive login is not available on Streamlit Cloud. "
+                "Log in locally (or via atstrack), then upload `data/sessions/auth_state.json` "
+                "using the sidebar uploader."
+            )
         ensure_playwright_browser()
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=False, env=playwright_env())
@@ -135,4 +137,4 @@ class SessionManager:
         storage = self.resolve_session_path()
         if storage is None:
             raise RuntimeError("No saved session. Please log in first.")
-        return browser.new_context(storage_state=str(storage))
+        return browser.new_context(storage_state=str(storage), accept_downloads=True)

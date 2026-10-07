@@ -2,6 +2,7 @@ from datetime import date
 
 import streamlit as st
 
+from src.auth.playwright_bootstrap import ensure_playwright_chromium, is_streamlit_cloud
 from src.auth.session import BROWSER_SETUP_MESSAGE, BrowserNotInstalledError, SessionManager
 from src.scraper.fee_invoices import FeeInvoiceScraper, SessionExpiredError
 from src.services.zip_bundle import ZipEntry, build_zip_bytes
@@ -58,11 +59,45 @@ def session_status_text() -> str:
     return f"Session expired or invalid ({source} file present)"
 
 
+@st.cache_resource
+def bootstrap_playwright() -> None:
+    ensure_playwright_chromium()
+
+
 def render_sidebar() -> None:
     st.sidebar.header("Seller Central")
     st.sidebar.caption(session_status_text())
 
-    if st.sidebar.button("Login to Seller Central", use_container_width=True):
+    if is_streamlit_cloud():
+        st.sidebar.info(
+            "On Streamlit Cloud, log in on your Mac, then upload "
+            "`data/sessions/auth_state.json` below (from this app or atstrack)."
+        )
+        uploaded = st.sidebar.file_uploader(
+            "Upload auth_state.json",
+            type=["json"],
+            help="Created after local Login to Seller Central",
+        )
+        if uploaded is not None and st.sidebar.button(
+            "Save uploaded session", use_container_width=True
+        ):
+            session_manager.import_storage_state_json(uploaded.getvalue())
+            st.session_state.session_valid = None
+            st.sidebar.success("Session file saved.")
+            st.rerun()
+    else:
+        try:
+            bootstrap_playwright()
+        except RuntimeError as exc:
+            st.sidebar.warning(str(exc))
+
+    login_disabled = is_streamlit_cloud()
+    if st.sidebar.button(
+        "Login to Seller Central",
+        use_container_width=True,
+        disabled=login_disabled,
+        help="Not available on Streamlit Cloud — upload session file instead.",
+    ):
         with st.spinner("Opening browser for login…"):
             try:
                 session_manager.login()
@@ -84,6 +119,12 @@ def render_sidebar() -> None:
 
 def main() -> None:
     init_session_state()
+    if is_streamlit_cloud():
+        with st.spinner("Preparing Playwright (first load may take a few minutes)…"):
+            try:
+                bootstrap_playwright()
+            except RuntimeError as exc:
+                st.error(str(exc))
     render_sidebar()
 
     st.title("Seller Fee Invoice Downloader")
@@ -119,8 +160,11 @@ def main() -> None:
 
         status = st.status("Starting download…", expanded=True)
 
+        progress_slot = st.empty()
+
         def on_progress(message: str) -> None:
             status.write(message)
+            progress_slot.caption(message)
 
         try:
             result = scraper.download_month(int(year), month, on_progress=on_progress)

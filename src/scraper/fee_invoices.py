@@ -4,19 +4,24 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Union
 
-from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
+from playwright.sync_api import Frame, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
-from src.auth.session import SessionManager, ensure_playwright_browser, playwright_env
+from src.auth.session import SessionManager, ensure_playwright_browser
+from src.auth.playwright_bootstrap import playwright_env
 from src.utils.dates import end_date_in_month, first_day_of_month_utc, parse_end_date_utc
 
 FEE_INVOICES_URL = "https://sellercentral.amazon.in/tax/seller-fee-invoices"
-PAGE_TIMEOUT_MS = 90_000
+PAGE_TIMEOUT_MS = 60_000
+TABLE_WAIT_TIMEOUT_S = 120
 DOWNLOAD_TIMEOUT_MS = 90_000
 MAX_LOAD_MORE = 50
+LOAD_MORE_ROW_WAIT_S = 12
 ROW_DELAY_S = 1.0
 DEBUG_DIR = Path(__file__).resolve().parents[2] / "data" / "debug"
+
+InvoiceRoot = Union[Page, Frame]
 
 EXTRACT_ROWS_JS = """
 () => {
@@ -80,6 +85,7 @@ ProgressCallback = Callable[[str], None]
 class FeeInvoiceScraper:
     def __init__(self, session_manager: SessionManager | None = None) -> None:
         self.session_manager = session_manager or SessionManager()
+        self._root: InvoiceRoot | None = None
 
     def download_month(
         self,
@@ -93,6 +99,7 @@ class FeeInvoiceScraper:
         ensure_playwright_browser()
         headless = os.environ.get("HEADED_DOWNLOAD", "").strip() not in ("1", "true", "yes")
         result = ScrapeResult()
+        self._root = None
 
         def progress(msg: str) -> None:
             if on_progress:
@@ -105,11 +112,13 @@ class FeeInvoiceScraper:
 
             try:
                 progress("Opening Seller Fee Invoices page…")
-                page.goto(FEE_INVOICES_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
-                page.wait_for_selector(
-                    "button[data-invoice][data-enddate]",
-                    timeout=PAGE_TIMEOUT_MS,
-                )
+                page.goto(FEE_INVOICES_URL, wait_until="commit", timeout=PAGE_TIMEOUT_MS)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=15_000)
+                except PlaywrightTimeoutError:
+                    pass
+
+                self._root = self._wait_for_invoice_table(page, progress)
                 self._ensure_logged_in(page)
 
                 progress("Loading invoice history…")
@@ -117,7 +126,7 @@ class FeeInvoiceScraper:
                 if warning:
                     result.warnings.append(warning)
 
-                raw_rows = self._extract_rows(page)
+                raw_rows = self._extract_rows()
                 if not raw_rows:
                     self._dump_debug(page, "no_rows")
                     raise FeeInvoiceScraperError(
@@ -159,13 +168,50 @@ class FeeInvoiceScraper:
 
         return result
 
+    def _find_invoice_root(self, page: Page) -> InvoiceRoot | None:
+        if page.locator("button[data-invoice][data-enddate]").count() > 0:
+            return page
+        for frame in page.frames:
+            if frame == page.main_frame:
+                continue
+            try:
+                if frame.locator("button[data-invoice][data-enddate]").count() > 0:
+                    return frame
+            except Exception:
+                continue
+        return None
+
+    def _wait_for_invoice_table(self, page: Page, progress: ProgressCallback) -> InvoiceRoot:
+        deadline = time.time() + TABLE_WAIT_TIMEOUT_S
+        attempt = 0
+        while time.time() < deadline:
+            attempt += 1
+            self._ensure_logged_in(page)
+            root = self._find_invoice_root(page)
+            if root is not None:
+                rows = root.evaluate(EXTRACT_ROWS_JS)
+                if rows:
+                    progress(f"Invoice table ready ({len(rows)} row(s) visible).")
+                    return root
+            if attempt == 1 or attempt % 4 == 0:
+                progress(f"Waiting for invoice table… ({attempt})")
+            page.wait_for_timeout(2000)
+
+        self._dump_debug(page, "timeout")
+        raise FeeInvoiceScraperError(
+            "Timed out waiting for the invoice table. Try logging in again, or set "
+            "HEADED_DOWNLOAD=1 and retry."
+        )
+
     def _ensure_logged_in(self, page: Page) -> None:
         url = page.url
         if "/ap/signin" in url or "/ap/mfa" in url:
             raise SessionExpiredError("Session expired. Please log in again.")
 
-    def _extract_rows(self, page: Page) -> list[dict]:
-        return page.evaluate(EXTRACT_ROWS_JS)
+    def _extract_rows(self) -> list[dict]:
+        if self._root is None:
+            return []
+        return self._root.evaluate(EXTRACT_ROWS_JS)
 
     def _filter_rows(self, raw_rows: list[dict], year: int, month: int) -> list[InvoiceRow]:
         matches: list[InvoiceRow] = []
@@ -209,7 +255,7 @@ class FeeInvoiceScraper:
         warning: str | None = None
 
         for attempt in range(MAX_LOAD_MORE + 1):
-            raw_rows = self._extract_rows(page)
+            raw_rows = self._extract_rows()
             oldest = self._oldest_end_date(raw_rows)
             if oldest is not None and oldest < target_start:
                 break
@@ -230,18 +276,16 @@ class FeeInvoiceScraper:
 
             previous_count = len(raw_rows)
             try:
+                load_more.scroll_into_view_if_needed()
                 load_more.click(timeout=10_000)
             except PlaywrightTimeoutError:
                 break
 
-            page.wait_for_timeout(1500)
-            try:
-                page.wait_for_function(
-                    f"() => document.querySelectorAll('table tbody tr').length > {previous_count}",
-                    timeout=15_000,
-                )
-            except PlaywrightTimeoutError:
-                page.wait_for_timeout(2000)
+            deadline = time.time() + LOAD_MORE_ROW_WAIT_S
+            while time.time() < deadline:
+                page.wait_for_timeout(500)
+                if len(self._extract_rows()) > previous_count:
+                    break
 
         return warning
 
@@ -261,15 +305,17 @@ class FeeInvoiceScraper:
                 continue
         return None
 
-    def _row_view_button(self, page: Page, invoice_number: str):
-        view = page.locator(f'button[data-invoice="{invoice_number}"]')
+    def _row_view_button(self, invoice_number: str):
+        if self._root is None:
+            raise FeeInvoiceScraperError("Invoice table not loaded")
+        view = self._root.locator(f'button[data-invoice="{invoice_number}"]')
         if view.count() == 0:
-            row = page.locator("table tbody tr").filter(has_text=invoice_number).first
+            row = self._root.locator("table tbody tr").filter(has_text=invoice_number).first
             view = row.get_by_role("button", name=re.compile(r"view", re.I))
         return view.first
 
     def _download_pdf(self, page: Page, context, invoice_number: str) -> bytes:
-        view = self._row_view_button(page, invoice_number)
+        view = self._row_view_button(invoice_number)
         view.scroll_into_view_if_needed()
         pages_before = len(context.pages)
 

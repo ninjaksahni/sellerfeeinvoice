@@ -10,6 +10,16 @@ Local Streamlit app to download Amazon Seller Central (India) **Seller Fee Invoi
 - Auto **Load More** until older rows are loaded or the target month is reachable
 - ZIP download in the browser (temporary; not archived on disk)
 
+## Streamlit Cloud
+
+This app can run on [Streamlit Community Cloud](https://streamlit.io/cloud), with limits:
+
+1. **`packages.txt`** — system libraries for headless Chromium (committed in this repo).
+2. **First visit** — the app downloads Chromium (~100MB); the first load can take several minutes.
+3. **Login** — interactive browser login **does not work** on Cloud. On your Mac, run the app locally (or atstrack), click **Login to Seller Central**, then upload `data/sessions/auth_state.json` in the Cloud app sidebar.
+
+Redeploy after pushing changes that touch `packages.txt` or Playwright setup.
+
 ## Prerequisites
 
 - Python 3.11+
