@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import threading
 from pathlib import Path
@@ -74,9 +75,10 @@ class SessionManager:
     def resolve_session_path(self) -> Path | None:
         if self.session_path.is_file():
             return self.session_path
-        fallback = atstrack_session_path()
-        if fallback.is_file():
-            return fallback
+        if not is_streamlit_cloud():
+            fallback = atstrack_session_path()
+            if fallback.is_file():
+                return fallback
         return None
 
     def session_source_label(self) -> str | None:
