@@ -9,7 +9,7 @@ from typing import Callable, Union
 from playwright.sync_api import Frame, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 from src.auth.session import SessionManager, ensure_playwright_browser
-from src.auth.playwright_bootstrap import playwright_env
+from src.auth.playwright_bootstrap import launch_chromium
 from src.utils.dates import end_date_in_month, first_day_of_month_utc, parse_end_date_utc
 
 FEE_INVOICES_URL = "https://sellercentral.amazon.in/tax/seller-fee-invoices"
@@ -106,7 +106,7 @@ class FeeInvoiceScraper:
                 on_progress(msg)
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=headless, env=playwright_env())
+            browser = launch_chromium(p, headless=headless)
             context = self.session_manager.new_context(browser)
             page = context.new_page()
 

@@ -8,7 +8,7 @@ from src.auth.playwright_bootstrap import (
     browser_setup_message,
     ensure_playwright_chromium,
     is_streamlit_cloud,
-    playwright_env,
+    launch_chromium,
 )
 
 SELLER_CENTRAL_URL = "https://sellercentral.amazon.in"
@@ -86,7 +86,7 @@ class SessionManager:
             )
         ensure_playwright_browser()
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False, env=playwright_env())
+            browser = launch_chromium(p, headless=False)
             context = browser.new_context()
             page = context.new_page()
             page.goto(SELLER_CENTRAL_URL, wait_until="domcontentloaded")
@@ -114,7 +114,7 @@ class SessionManager:
         try:
             ensure_playwright_browser()
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True, env=playwright_env())
+                browser = launch_chromium(p, headless=True)
                 context = browser.new_context(storage_state=str(storage))
                 page = context.new_page()
                 page.goto(SELLER_CENTRAL_URL, wait_until="domcontentloaded", timeout=30_000)

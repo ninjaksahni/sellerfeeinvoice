@@ -120,7 +120,7 @@ def render_sidebar() -> None:
 def main() -> None:
     init_session_state()
     if is_streamlit_cloud():
-        with st.spinner("Preparing Playwright (first load may take a few minutes)…"):
+        with st.spinner("Checking system Chromium…"):
             try:
                 bootstrap_playwright()
             except RuntimeError as exc:
