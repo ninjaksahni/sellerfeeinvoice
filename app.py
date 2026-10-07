@@ -115,7 +115,11 @@ def render_sidebar() -> None:
                     except Exception as exc:
                         st.sidebar.error(f"Login failed: {exc}")
         else:
-            st.sidebar.caption("Step 1: email and password")
+            st.sidebar.warning(
+            "Amazon often blocks sign-in from Streamlit Cloud (no OTP). "
+            "Reliable option: run locally with `bash scripts/launch.sh` → Login to Seller Central."
+        )
+        st.sidebar.caption("Step 1: email and password")
             with st.sidebar.form("cloud_login_credentials"):
                 email = st.text_input("Email", autocomplete="username")
                 password = st.text_input("Password", type="password", autocomplete="current-password")

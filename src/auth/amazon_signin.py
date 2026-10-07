@@ -3,12 +3,34 @@ from pathlib import Path
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 
-SIGNIN_STEP_TIMEOUT_MS = 60_000
+SIGNIN_STEP_TIMEOUT_MS = 90_000
 DEBUG_DIR = Path(__file__).resolve().parents[2] / "data" / "debug"
 
 CHROME_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+AMAZON_IN_SIGNIN_URL = (
+    "https://www.amazon.in/ap/signin"
+    "?openid.pape.max_auth_age=0"
+    "&openid.return_to=https%3A%2F%2Fsellercentral.amazon.in%2Fhome"
+    "&openid.identity=http://specs.openid.net/auth/2.0/identifier_select"
+    "&openid.assoc_handle=sc_in_amazon_v2"
+    "&openid.mode=form"
+    "&openid.claimed_id=http://specs.openid.net/auth/2.0/identifier_select"
+    "&openid.ns=http://specs.openid.net/auth/2.0"
+)
+
+SIGN_IN_READY_SELECTOR = (
+    "#ap_email, input[name='email'], input[type='email'], "
+    "#ap_password, input[name='password'], "
+    "#auth-mfa-otpcode, #cvf_input_code, input[name='otpCode']"
+)
+
+EMAIL_SELECTOR = (
+    "#ap_email, input[name='email'], input[type='email'], "
+    "input[autocomplete='username'], #ap_email_login"
 )
 
 
@@ -56,7 +78,7 @@ def on_sign_in_flow(page: Page) -> bool:
     url = page.url.lower()
     if "/ap/signin" in url or "/ap/mfa" in url or "/ap/cvf" in url:
         return True
-    if page.locator("#ap_email, #ap_password, #auth-mfa-otpcode").count() > 0:
+    if page.locator(SIGN_IN_READY_SELECTOR).count() > 0:
         return True
     return False
 
@@ -126,23 +148,119 @@ def wait_after_password_submit(page: Page) -> None:
         page.wait_for_timeout(3000)
 
 
+def wait_for_sign_in_ready(page: Page) -> None:
+    try:
+        page.wait_for_selector(
+            SIGN_IN_READY_SELECTOR,
+            state="visible",
+            timeout=SIGNIN_STEP_TIMEOUT_MS,
+        )
+    except PlaywrightTimeoutError:
+        dump_login_debug(page, "signin_form_timeout")
+        msg = read_auth_error(page)
+        hint = (
+            f"Amazon sign-in form did not appear (page: {page.url}). "
+            "Streamlit Cloud IPs are often blocked — log in on your Mac with "
+            "`bash scripts/launch.sh` and **Login to Seller Central** instead."
+        )
+        if msg:
+            hint = f"{hint} Amazon said: {msg}"
+        raise ValueError(hint)
+
+
+def prepare_sign_in_page(page: Page, handle_account_picker) -> None:
+    """Navigate to a page where email/password or OTP can be entered."""
+    urls = [
+        AMAZON_IN_SIGNIN_URL,
+        "https://sellercentral.amazon.in/ap/signin",
+        "https://sellercentral.amazon.in/home",
+    ]
+    for url in urls:
+        page.goto(url, wait_until="domcontentloaded", timeout=SIGNIN_STEP_TIMEOUT_MS)
+        page.wait_for_timeout(2500)
+        try:
+            handle_account_picker(page)
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+        if on_sign_in_flow(page):
+            wait_for_sign_in_ready(page)
+            return
+        sign_in_link = page.get_by_role("link", name=re.compile(r"log\s*in|sign\s*in", re.I))
+        if sign_in_link.count() > 0:
+            try:
+                sign_in_link.first.click(timeout=5000)
+                page.wait_for_load_state("domcontentloaded", timeout=SIGNIN_STEP_TIMEOUT_MS)
+                page.wait_for_timeout(2000)
+            except Exception:
+                pass
+        if on_sign_in_flow(page):
+            wait_for_sign_in_ready(page)
+            return
+
+    wait_for_sign_in_ready(page)
+
+
+def _click_continue(page: Page) -> None:
+    for locator in (
+        page.locator("#continue"),
+        page.locator("input#continue"),
+        page.get_by_role("button", name=re.compile(r"continue", re.I)),
+    ):
+        if locator.count() == 0:
+            continue
+        try:
+            locator.first.click(timeout=5000)
+            return
+        except Exception:
+            continue
+
+
+def _fill_email_if_needed(page: Page, email: str) -> None:
+    email_input = page.locator(EMAIL_SELECTOR).first
+    try:
+        email_input.wait_for(state="visible", timeout=8000)
+    except PlaywrightTimeoutError:
+        return
+
+    try:
+        current = email_input.input_value()
+        if current.strip():
+            return
+    except Exception:
+        pass
+
+    email_input.fill(email)
+    _click_continue(page)
+    page.wait_for_timeout(2000)
+
+
 def submit_email_and_password(page: Page, email: str, password: str) -> None:
-    if page.locator("#ap_password:visible").count() == 0:
-        email_input = page.locator("#ap_email, input[name='email']").first
-        email_input.wait_for(state="visible", timeout=SIGNIN_STEP_TIMEOUT_MS)
-        email_input.fill(email)
-        continue_btn = page.locator(
-            "#continue, input#continue, button:has-text('Continue'), span:has-text('Continue')"
-        ).first
-        continue_btn.click()
-        page.wait_for_timeout(1500)
+    wait_for_sign_in_ready(page)
+
+    if needs_otp(page):
+        return
+
+    _fill_email_if_needed(page, email)
 
     password_input = page.locator("#ap_password, input[name='password']").first
     password_input.wait_for(state="visible", timeout=SIGNIN_STEP_TIMEOUT_MS)
     password_input.fill(password)
-    page.locator(
-        "#signInSubmit, input#signInSubmit, button:has-text('Sign in'), input[type='submit']"
-    ).first.click()
+
+    for locator in (
+        page.locator("#signInSubmit"),
+        page.locator("input#signInSubmit"),
+        page.get_by_role("button", name=re.compile(r"sign\s*in", re.I)),
+        page.locator("input[type='submit']"),
+    ):
+        if locator.count() == 0:
+            continue
+        try:
+            locator.first.click(timeout=5000)
+            break
+        except Exception:
+            continue
+
     wait_after_password_submit(page)
 
 

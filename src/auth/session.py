@@ -5,7 +5,13 @@ from os import getenv
 from pathlib import Path
 from typing import Literal
 
-from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
+from playwright.sync_api import (
+    Browser,
+    BrowserContext,
+    Page,
+    TimeoutError as PlaywrightTimeoutError,
+    sync_playwright,
+)
 
 from src.auth.amazon_signin import (
     auth_context_options,
@@ -13,11 +19,13 @@ from src.auth.amazon_signin import (
     has_captcha,
     needs_otp,
     on_sign_in_flow,
+    prepare_sign_in_page,
     read_auth_error,
     submit_email_and_password,
     submit_otp,
     try_send_otp,
 )
+from src.scraper.account_picker import handle_account_picker
 from src.auth.playwright_bootstrap import (
     browser_setup_message,
     ensure_playwright_chromium,
@@ -136,13 +144,22 @@ class SessionManager:
             context = browser.new_context(**auth_context_options())
             page = context.new_page()
             try:
-                self._open_sign_in(page)
+                prepare_sign_in_page(page, handle_account_picker)
 
                 if self._is_logged_in(page):
                     self.save_storage_state(context)
                     return "complete"
 
-                submit_email_and_password(page, email, password)
+                try:
+                    submit_email_and_password(page, email, password)
+                except PlaywrightTimeoutError as exc:
+                    dump_login_debug(page, "credentials_timeout")
+                    raise LoginError(
+                        "Amazon sign-in timed out. Cloud servers are often blocked — "
+                        "use local login: bash scripts/launch.sh"
+                    ) from exc
+                except ValueError as exc:
+                    raise LoginError(str(exc)) from exc
                 self._raise_login_blockers(page, "after_password")
 
                 if needs_otp(page):
@@ -220,21 +237,6 @@ class SessionManager:
                 raise
             finally:
                 browser.close()
-
-    def _open_sign_in(self, page: Page) -> None:
-        page.goto(SIGNIN_ENTRY_URL, wait_until="domcontentloaded", timeout=SIGNIN_STEP_TIMEOUT_MS)
-        page.wait_for_timeout(2000)
-        if on_sign_in_flow(page):
-            return
-        page.goto(SELLER_CENTRAL_URL, wait_until="domcontentloaded", timeout=SIGNIN_STEP_TIMEOUT_MS)
-        page.wait_for_timeout(2000)
-        if on_sign_in_flow(page) or self._is_logged_in(page):
-            return
-        sign_in = page.get_by_role("link", name=re.compile(r"log\s*in|sign\s*in", re.I))
-        if sign_in.count() > 0:
-            sign_in.first.click()
-            page.wait_for_load_state("domcontentloaded", timeout=SIGNIN_STEP_TIMEOUT_MS)
-            page.wait_for_timeout(1500)
 
     def _raise_login_blockers(self, page: Page, step: str) -> None:
         if has_captcha(page):
