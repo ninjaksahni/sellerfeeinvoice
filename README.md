@@ -46,9 +46,21 @@ playwright install chromium
 
 ## Usage
 
+Use the project virtualenv (system Python does not have Playwright):
+
 ```bash
+bash scripts/launch.sh
+```
+
+Or manually:
+
+```bash
+source .venv/bin/activate
+unset PLAYWRIGHT_BROWSERS_PATH
 streamlit run app.py
 ```
+
+First time: `bash scripts/setup.sh`
 
 1. Sidebar: **Login to Seller Central** (or use an existing atstrack session).
 2. Choose month and year.
