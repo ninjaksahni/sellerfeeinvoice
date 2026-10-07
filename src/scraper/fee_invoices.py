@@ -10,6 +10,7 @@ from playwright.sync_api import Frame, Page, TimeoutError as PlaywrightTimeoutEr
 
 from src.auth.session import SessionManager, ensure_playwright_browser
 from src.auth.playwright_bootstrap import launch_chromium
+from src.scraper.account_picker import handle_account_picker, on_account_picker
 from src.utils.dates import end_date_in_month, first_day_of_month_utc, parse_end_date_utc
 
 FEE_INVOICES_URL = "https://sellercentral.amazon.in/tax/seller-fee-invoices"
@@ -112,12 +113,7 @@ class FeeInvoiceScraper:
 
             try:
                 progress("Opening Seller Fee Invoices page…")
-                page.goto(FEE_INVOICES_URL, wait_until="commit", timeout=PAGE_TIMEOUT_MS)
-                try:
-                    page.wait_for_load_state("networkidle", timeout=15_000)
-                except PlaywrightTimeoutError:
-                    pass
-
+                self._goto_fee_invoices(page, progress)
                 self._root = self._wait_for_invoice_table(page, progress)
                 self._ensure_logged_in(page)
 
@@ -168,6 +164,23 @@ class FeeInvoiceScraper:
 
         return result
 
+    def _goto_fee_invoices(self, page: Page, progress: ProgressCallback) -> None:
+        page.goto(FEE_INVOICES_URL, wait_until="commit", timeout=PAGE_TIMEOUT_MS)
+        try:
+            page.wait_for_load_state("networkidle", timeout=15_000)
+        except PlaywrightTimeoutError:
+            pass
+        page.wait_for_timeout(1500)
+
+        if handle_account_picker(page, on_progress=progress):
+            progress("Opening Seller Fee Invoices page…")
+            page.goto(FEE_INVOICES_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+            page.wait_for_timeout(2000)
+            if on_account_picker(page):
+                handle_account_picker(page, on_progress=progress)
+                page.goto(FEE_INVOICES_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+                page.wait_for_timeout(2000)
+
     def _find_invoice_root(self, page: Page) -> InvoiceRoot | None:
         if page.locator("button[data-invoice][data-enddate]").count() > 0:
             return page
@@ -187,6 +200,10 @@ class FeeInvoiceScraper:
         while time.time() < deadline:
             attempt += 1
             self._ensure_logged_in(page)
+            if on_account_picker(page):
+                handle_account_picker(page, on_progress=progress)
+                page.goto(FEE_INVOICES_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+                page.wait_for_timeout(2000)
             root = self._find_invoice_root(page)
             if root is not None:
                 rows = root.evaluate(EXTRACT_ROWS_JS)
@@ -198,14 +215,20 @@ class FeeInvoiceScraper:
             page.wait_for_timeout(2000)
 
         self._dump_debug(page, "timeout")
+        if on_account_picker(page):
+            raise FeeInvoiceScraperError(
+                "Stuck on Amazon's account picker. Set SELLER_ACCOUNT_LABEL=India "
+                "(or your marketplace name) and retry, or pick the account in the "
+                "browser with HEADED_DOWNLOAD=1."
+            )
         raise FeeInvoiceScraperError(
-            "Timed out waiting for the invoice table. Try logging in again, or set "
-            "HEADED_DOWNLOAD=1 and retry."
+            "Timed out waiting for the invoice table. Log in again, or set "
+            "HEADED_DOWNLOAD=1 to see what the browser shows."
         )
 
     def _ensure_logged_in(self, page: Page) -> None:
         url = page.url
-        if "/ap/signin" in url or "/ap/mfa" in url:
+        if "/ap/signin" in url or "/ap/mfa" in url or "/ap/cvf" in url:
             raise SessionExpiredError("Session expired. Please log in again.")
 
     def _extract_rows(self) -> list[dict]:

@@ -62,6 +62,12 @@ streamlit run app.py
 
 First time: `bash scripts/setup.sh`
 
+If download hangs on account selection, confirm your marketplace in the picker (default label `India`):
+
+```bash
+export SELLER_ACCOUNT_LABEL=India
+```
+
 1. Sidebar: **Login to Seller Central** (or use an existing atstrack session).
 2. Choose month and year.
 3. Click **Download invoices** and save the ZIP when prompted.
