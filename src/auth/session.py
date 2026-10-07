@@ -1,11 +1,22 @@
 import json
-import os
+import re
 import threading
 from pathlib import Path
 from typing import Literal
 
 from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
 
+from src.auth.amazon_signin import (
+    auth_context_options,
+    dump_login_debug,
+    has_captcha,
+    needs_otp,
+    on_sign_in_flow,
+    read_auth_error,
+    submit_email_and_password,
+    submit_otp,
+    try_send_otp,
+)
 from src.auth.playwright_bootstrap import (
     browser_setup_message,
     ensure_playwright_chromium,
@@ -14,6 +25,7 @@ from src.auth.playwright_bootstrap import (
 )
 
 SELLER_CENTRAL_URL = "https://sellercentral.amazon.in"
+SIGNIN_ENTRY_URL = "https://sellercentral.amazon.in/ap/signin"
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 SESSION_PATH = DATA_DIR / "sessions" / "auth_state.json"
 PENDING_LOGIN_PATH = DATA_DIR / "sessions" / "login_pending_state.json"
@@ -85,13 +97,11 @@ class SessionManager:
     def login(self) -> None:
         """Open a headed browser on your machine (ATS Track style). Local only."""
         if is_streamlit_cloud():
-            raise LoginError(
-                "Use the email/password sign-in form below on Streamlit Cloud."
-            )
+            raise LoginError("Use the email/password sign-in form below on Streamlit Cloud.")
         ensure_playwright_browser()
         with sync_playwright() as p:
             browser = launch_chromium(p, headless=False)
-            context = browser.new_context()
+            context = browser.new_context(**auth_context_options())
             page = context.new_page()
             page.goto(SELLER_CENTRAL_URL, wait_until="domcontentloaded")
             self._wait_for_login(page)
@@ -116,32 +126,41 @@ class SessionManager:
         ensure_playwright_browser()
         with sync_playwright() as p:
             browser = launch_chromium(p, headless=True)
-            context = browser.new_context()
+            context = browser.new_context(**auth_context_options())
             page = context.new_page()
-            page.goto(SELLER_CENTRAL_URL, wait_until="domcontentloaded", timeout=SIGNIN_STEP_TIMEOUT_MS)
-            page.wait_for_timeout(1500)
+            try:
+                self._open_sign_in(page)
 
-            if self._is_logged_in(page):
+                if self._is_logged_in(page):
+                    self.save_storage_state(context)
+                    return "complete"
+
+                submit_email_and_password(page, email, password)
+                self._raise_login_blockers(page, "after_password")
+
+                if needs_otp(page):
+                    try_send_otp(page)
+                    self._save_pending_login(context, page.url)
+                    return "otp_required"
+
+                if on_sign_in_flow(page):
+                    dump_login_debug(page, "credentials_stuck")
+                    msg = read_auth_error(page)
+                    if msg:
+                        raise LoginError(f"Amazon sign-in failed: {msg}")
+                    raise LoginError(
+                        "Amazon did not accept email/password (no OTP step). "
+                        "Check credentials, or use local browser login if Amazon blocked automation."
+                    )
+
+                self._wait_for_login(page)
                 self.save_storage_state(context)
-                browser.close()
                 return "complete"
-
-            self._submit_email_and_password(page, email, password)
-            self._raise_if_captcha(page)
-
-            if self._needs_otp(page):
-                self._save_pending_login(context, page.url)
+            except LoginError:
+                dump_login_debug(page, "credentials_error")
+                raise
+            finally:
                 browser.close()
-                return "otp_required"
-
-            if "/ap/signin" in page.url:
-                browser.close()
-                raise LoginError("Sign-in failed. Check your email and password.")
-
-            self._wait_for_login(page)
-            self.save_storage_state(context)
-            browser.close()
-            return "complete"
 
     def login_submit_otp(self, otp: str) -> None:
         """Step 2: OTP after Amazon challenges following email/password."""
@@ -152,37 +171,73 @@ class SessionManager:
             raise LoginError("Enter your email and password first.")
 
         meta = json.loads(PENDING_LOGIN_META_PATH.read_text(encoding="utf-8"))
-        resume_url = meta.get("url") or SELLER_CENTRAL_URL
+        resume_url = meta.get("url") or SIGNIN_ENTRY_URL
 
         ensure_playwright_browser()
         with sync_playwright() as p:
             browser = launch_chromium(p, headless=True)
-            context = browser.new_context(storage_state=str(PENDING_LOGIN_PATH))
+            context = browser.new_context(
+                **auth_context_options(),
+                storage_state=str(PENDING_LOGIN_PATH),
+            )
             page = context.new_page()
-            page.goto(resume_url, wait_until="domcontentloaded", timeout=SIGNIN_STEP_TIMEOUT_MS)
+            try:
+                page.goto(resume_url, wait_until="domcontentloaded", timeout=SIGNIN_STEP_TIMEOUT_MS)
+                page.wait_for_timeout(2000)
+
+                if not needs_otp(page):
+                    if self._is_logged_in(page):
+                        self.save_storage_state(context)
+                        self.clear_pending_login()
+                        return
+                    dump_login_debug(page, "otp_expired")
+                    self.clear_pending_login()
+                    raise LoginError("OTP step expired. Enter email and password again.")
+
+                try_send_otp(page)
+                submit_otp(page, otp)
+                self._raise_login_blockers(page, "after_otp")
+
+                if needs_otp(page) or on_sign_in_flow(page):
+                    msg = read_auth_error(page)
+                    dump_login_debug(page, "otp_rejected")
+                    if msg:
+                        raise LoginError(f"OTP failed: {msg}")
+                    raise LoginError("OTP was not accepted. Request a new code and try again.")
+
+                self._wait_for_login(page)
+                self.save_storage_state(context)
+                self.clear_pending_login()
+            except LoginError:
+                dump_login_debug(page, "otp_error")
+                raise
+            finally:
+                browser.close()
+
+    def _open_sign_in(self, page: Page) -> None:
+        page.goto(SIGNIN_ENTRY_URL, wait_until="domcontentloaded", timeout=SIGNIN_STEP_TIMEOUT_MS)
+        page.wait_for_timeout(2000)
+        if on_sign_in_flow(page):
+            return
+        page.goto(SELLER_CENTRAL_URL, wait_until="domcontentloaded", timeout=SIGNIN_STEP_TIMEOUT_MS)
+        page.wait_for_timeout(2000)
+        if on_sign_in_flow(page) or self._is_logged_in(page):
+            return
+        sign_in = page.get_by_role("link", name=re.compile(r"log\s*in|sign\s*in", re.I))
+        if sign_in.count() > 0:
+            sign_in.first.click()
+            page.wait_for_load_state("domcontentloaded", timeout=SIGNIN_STEP_TIMEOUT_MS)
             page.wait_for_timeout(1500)
 
-            if not self._needs_otp(page):
-                if self._is_logged_in(page):
-                    self.save_storage_state(context)
-                    self.clear_pending_login()
-                    browser.close()
-                    return
-                browser.close()
-                self.clear_pending_login()
-                raise LoginError("OTP step expired. Enter email and password again.")
-
-            self._submit_otp(page, otp)
-            self._raise_if_captcha(page)
-
-            if self._needs_otp(page) or "/ap/mfa" in page.url:
-                browser.close()
-                raise LoginError("OTP was not accepted. Try again.")
-
-            self._wait_for_login(page)
-            self.save_storage_state(context)
-            self.clear_pending_login()
-            browser.close()
+    def _raise_login_blockers(self, page: Page, step: str) -> None:
+        if has_captcha(page):
+            dump_login_debug(page, f"{step}_captcha")
+            raise LoginError(
+                "Amazon showed a CAPTCHA. Use **Login to Seller Central** on your Mac instead."
+            )
+        msg = read_auth_error(page)
+        if msg:
+            raise LoginError(f"Amazon sign-in: {msg}")
 
     def _save_pending_login(self, context: BrowserContext, url: str) -> None:
         with self._session_lock:
@@ -192,40 +247,6 @@ class SessionManager:
                 json.dumps({"url": url}),
                 encoding="utf-8",
             )
-
-    def _submit_email_and_password(self, page: Page, email: str, password: str) -> None:
-        email_input = page.locator("#ap_email, input[name='email']").first
-        email_input.wait_for(state="visible", timeout=SIGNIN_STEP_TIMEOUT_MS)
-        email_input.fill(email)
-        page.locator("#continue, input#continue, button:has-text('Continue')").first.click()
-
-        password_input = page.locator("#ap_password, input[name='password']").first
-        password_input.wait_for(state="visible", timeout=SIGNIN_STEP_TIMEOUT_MS)
-        password_input.fill(password)
-        page.locator("#signInSubmit, input#signInSubmit, button:has-text('Sign in')").first.click()
-        page.wait_for_timeout(2500)
-
-    def _submit_otp(self, page: Page, otp: str) -> None:
-        otp_input = page.locator(
-            "#auth-mfa-otpcode, input[name='otpCode'], input[name='code']"
-        ).first
-        otp_input.wait_for(state="visible", timeout=SIGNIN_STEP_TIMEOUT_MS)
-        otp_input.fill(otp)
-        page.locator(
-            "#auth-signin-button, input#auth-signin-button, button:has-text('Sign in')"
-        ).first.click()
-        page.wait_for_timeout(2500)
-
-    def _raise_if_captcha(self, page: Page) -> None:
-        if page.locator("text=/captcha|puzzle|Type the characters/i").count() > 0:
-            raise LoginError(
-                "Amazon showed a CAPTCHA. Sign in locally with the browser login button instead."
-            )
-
-    def _needs_otp(self, page: Page) -> bool:
-        if "/ap/mfa" in page.url:
-            return True
-        return page.locator("#auth-mfa-otpcode, input[name='otpCode']").count() > 0
 
     def _wait_for_login(self, page: Page) -> None:
         page.wait_for_function(
@@ -248,7 +269,10 @@ class SessionManager:
             ensure_playwright_browser()
             with sync_playwright() as p:
                 browser = launch_chromium(p, headless=True)
-                context = browser.new_context(storage_state=str(storage))
+                context = browser.new_context(
+                    **auth_context_options(),
+                    storage_state=str(storage),
+                )
                 page = context.new_page()
                 page.goto(SELLER_CENTRAL_URL, wait_until="domcontentloaded", timeout=30_000)
                 page.wait_for_timeout(2000)
@@ -260,7 +284,7 @@ class SessionManager:
 
     def _is_logged_in(self, page: Page) -> bool:
         url = page.url
-        if "/ap/signin" in url or "/ap/mfa" in url:
+        if "/ap/signin" in url or "/ap/mfa" in url or "/ap/cvf" in url:
             return False
         if "sellercentral.amazon.in" not in url:
             return False
@@ -270,4 +294,8 @@ class SessionManager:
         storage = self.resolve_session_path()
         if storage is None:
             raise RuntimeError("No saved session. Please log in first.")
-        return browser.new_context(storage_state=str(storage), accept_downloads=True)
+        return browser.new_context(
+            **auth_context_options(),
+            storage_state=str(storage),
+            accept_downloads=True,
+        )

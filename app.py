@@ -123,7 +123,9 @@ def render_sidebar() -> None:
                         phase = session_manager.login_submit_credentials(email, password)
                         if phase == "otp_required":
                             st.session_state.cloud_login_phase = "otp"
-                            st.sidebar.info("Check your phone or authenticator for an OTP.")
+                            st.sidebar.success(
+                                "Password accepted. Amazon should send an OTP — enter it in step 2."
+                            )
                             st.rerun()
                         st.session_state.session_valid = True
                         st.session_state.cloud_login_phase = "credentials"
