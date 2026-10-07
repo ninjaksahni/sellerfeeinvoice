@@ -44,6 +44,8 @@ def init_session_state() -> None:
         st.session_state.last_errors = []
     if "last_warnings" not in st.session_state:
         st.session_state.last_warnings = []
+    if "cloud_login_phase" not in st.session_state:
+        st.session_state.cloud_login_phase = "credentials"
 
 
 def check_session() -> bool:
@@ -81,28 +83,59 @@ def render_sidebar() -> None:
             st.sidebar.warning(str(exc))
 
     if is_streamlit_cloud():
-        st.sidebar.caption(
-            "On Cloud, sign in with your seller email and password (same account as Seller Central)."
-        )
-        with st.sidebar.form("cloud_login"):
-            email = st.text_input("Email", autocomplete="username")
-            password = st.text_input("Password", type="password", autocomplete="current-password")
-            otp = st.text_input("OTP (only if Amazon asks)", type="password")
-            submitted = st.form_submit_button("Sign in to Seller Central", use_container_width=True)
-        if submitted:
-            with st.spinner("Signing in…"):
-                try:
-                    session_manager.login_with_credentials(email, password, otp or None)
-                    st.session_state.session_valid = True
-                    st.sidebar.success("Login successful!")
-                    st.rerun()
-                except BrowserNotInstalledError:
-                    st.sidebar.error("Playwright browser not installed.")
-                    st.sidebar.code(BROWSER_SETUP_MESSAGE, language="bash")
-                except LoginError as exc:
-                    st.sidebar.error(str(exc))
-                except Exception as exc:
-                    st.sidebar.error(f"Login failed: {exc}")
+        pending_otp = session_manager.has_pending_login()
+        if pending_otp:
+            st.session_state.cloud_login_phase = "otp"
+
+        if st.session_state.cloud_login_phase == "otp":
+            st.sidebar.info("Amazon sent an OTP. Enter it below.")
+            with st.sidebar.form("cloud_login_otp"):
+                otp = st.text_input("One-time password (OTP)", type="password")
+                otp_submitted = st.form_submit_button("Verify OTP", use_container_width=True)
+            if st.sidebar.button("Start over", use_container_width=True):
+                session_manager.clear_pending_login()
+                st.session_state.cloud_login_phase = "credentials"
+                st.rerun()
+            if otp_submitted:
+                with st.spinner("Verifying OTP…"):
+                    try:
+                        session_manager.login_submit_otp(otp)
+                        st.session_state.session_valid = True
+                        st.session_state.cloud_login_phase = "credentials"
+                        st.sidebar.success("Login successful!")
+                        st.rerun()
+                    except BrowserNotInstalledError:
+                        st.sidebar.error("Playwright browser not installed.")
+                        st.sidebar.code(BROWSER_SETUP_MESSAGE, language="bash")
+                    except LoginError as exc:
+                        st.sidebar.error(str(exc))
+                    except Exception as exc:
+                        st.sidebar.error(f"Login failed: {exc}")
+        else:
+            st.sidebar.caption("Step 1: email and password")
+            with st.sidebar.form("cloud_login_credentials"):
+                email = st.text_input("Email", autocomplete="username")
+                password = st.text_input("Password", type="password", autocomplete="current-password")
+                cred_submitted = st.form_submit_button("Continue", use_container_width=True)
+            if cred_submitted:
+                with st.spinner("Signing in…"):
+                    try:
+                        phase = session_manager.login_submit_credentials(email, password)
+                        if phase == "otp_required":
+                            st.session_state.cloud_login_phase = "otp"
+                            st.sidebar.info("Check your phone or authenticator for an OTP.")
+                            st.rerun()
+                        st.session_state.session_valid = True
+                        st.session_state.cloud_login_phase = "credentials"
+                        st.sidebar.success("Login successful!")
+                        st.rerun()
+                    except BrowserNotInstalledError:
+                        st.sidebar.error("Playwright browser not installed.")
+                        st.sidebar.code(BROWSER_SETUP_MESSAGE, language="bash")
+                    except LoginError as exc:
+                        st.sidebar.error(str(exc))
+                    except Exception as exc:
+                        st.sidebar.error(f"Login failed: {exc}")
     elif st.sidebar.button("Login to Seller Central", use_container_width=True):
         with st.spinner("Opening browser for login…"):
             try:
